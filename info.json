@@ -1,0 +1,10 @@
+{
+    "author": ["TheOneMightyArc"],
+    "install_msg": "StaffManager installed. Use `[p]staffset` to configure your roles and channels.",
+    "name": "StaffManager",
+    "short": "Professional Staff Management System.",
+    "description": "Handles staff promotions, demotions, strikes, and maintains a live Staff List embed. Converted from Drako Bot.",
+    "tags": ["staff", "moderation", "management", "utility"],
+    "requirements": [],
+    "min_bot_version": "3.5.0"
+}
