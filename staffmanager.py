@@ -1,3 +1,5 @@
+
+# pyright: ignore[reportMissingImports]
 import discord
 import asyncio
 import logging
@@ -45,6 +47,7 @@ class StaffManager(commands.Cog):
         
         # Debounce for staff list updates
         self._list_update_locks = {}
+        self._list_update_pending = set()
         self.strike_cleanup_loop.start()
 
     def cog_unload(self):
@@ -103,102 +106,108 @@ class StaffManager(commands.Cog):
         """Generates and updates the live staff list message."""
         # Simple debounce
         if guild.id in self._list_update_locks:
+            # Queue a follow-up refresh so updates are not dropped while locked.
+            self._list_update_pending.add(guild.id)
             return
         self._list_update_locks[guild.id] = True
         
         try:
-            # Wait a moment to batch rapid changes
-            await asyncio.sleep(5) 
-            
-            data = await self.config.guild(guild).all()
-            channel_id = data['setup']['staff_list_channel']
-            msg_id = data['setup']['list_message_id']
-            
-            if not channel_id:
-                return
+            while True:
+                self._list_update_pending.discard(guild.id)
 
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                return
+                # Wait a moment to batch rapid changes
+                await asyncio.sleep(5)
 
-            embed = discord.Embed(
-                title=f"🛡️ {guild.name} Staff Team",
-                color=data['settings']['embed_color'],
-                timestamp=datetime.utcnow()
-            )
-            
-            # Use specific image if configured (placeholder logic)
-            if guild.icon:
-                embed.set_thumbnail(url=guild.icon.url)
+                data = await self.config.guild(guild).all()
+                channel_id = data['setup']['staff_list_channel']
+                msg_id = data['setup']['list_message_id']
 
-            staff_roles = await self.get_staff_roles(guild)
-            
-            total_staff = 0
-            
-            for role, rdata in staff_roles:
-                # Get members with this role
-                members = [m for m in role.members]
-                
-                # Filter: If a member has multiple staff roles, only show them in the HIGHEST hierarchy one
-                # This requires checking against all other configured staff roles
-                unique_members = []
-                for m in members:
-                    highest_hierarchy = 0
-                    highest_role_id = None
-                    
-                    # Find user's actual highest staff role
-                    for sr_role, sr_data in staff_roles:
-                        if sr_role in m.roles:
-                            if sr_data['hierarchy'] > highest_hierarchy:
-                                highest_hierarchy = sr_data['hierarchy']
-                                highest_role_id = sr_role.id
-                    
-                    if highest_role_id == role.id:
-                        unique_members.append(m)
+                if channel_id:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        embed = discord.Embed(
+                            title=f"🛡️ {guild.name} Staff Team",
+                            color=data['settings']['embed_color'],
+                            timestamp=datetime.utcnow()
+                        )
 
-                if not unique_members:
-                    continue
+                        # Use specific image if configured (placeholder logic)
+                        if guild.icon:
+                            embed.set_thumbnail(url=guild.icon.url)
 
-                # Sort by status priority (Online > Idle > DND > Offline)
-                def sort_key(m):
-                    status_order = {"online": 0, "idle": 1, "dnd": 2, "offline": 3}
-                    return (status_order.get(str(m.status), 3), m.joined_at or datetime.utcnow())
+                        staff_roles = await self.get_staff_roles(guild)
 
-                unique_members.sort(key=sort_key)
-                total_staff += len(unique_members)
+                        total_staff = 0
 
-                lines = []
-                for m in unique_members:
-                    status_emojis = {
-                        "online": "🟢", "idle": "🌙", "dnd": "🔴", "offline": "⚫", "streaming": "🟣"
-                    }
-                    emoji = status_emojis.get(str(m.status), "⚫")
-                    
-                    line = f"{m.mention}"
-                    if data['settings']['show_status']:
-                        line = f"{emoji} {line}"
-                    if data['settings']['show_join_date']:
-                        line += f" `Joined: {m.joined_at.strftime('%Y-%m-%d')}`"
-                    lines.append(line)
+                        for role, rdata in staff_roles:
+                            # Get members with this role
+                            members = [m for m in role.members]
 
-                embed.add_field(name=f"{rdata['label']} ({len(unique_members)})", value="\n".join(lines), inline=False)
+                            # Filter: If a member has multiple staff roles, only show them in the HIGHEST hierarchy one
+                            # This requires checking against all other configured staff roles
+                            unique_members = []
+                            for m in members:
+                                highest_hierarchy = 0
+                                highest_role_id = None
 
-            embed.set_footer(text=f"Total Staff: {total_staff}")
+                                # Find user's actual highest staff role
+                                for sr_role, sr_data in staff_roles:
+                                    if sr_role in m.roles:
+                                        if sr_data['hierarchy'] > highest_hierarchy:
+                                            highest_hierarchy = sr_data['hierarchy']
+                                            highest_role_id = sr_role.id
 
-            # Send or Edit
-            if msg_id:
-                try:
-                    msg = await channel.fetch_message(msg_id)
-                    await msg.edit(embed=embed)
-                    return
-                except discord.NotFound:
-                    pass # Message deleted, send new one
+                                if highest_role_id == role.id:
+                                    unique_members.append(m)
 
-            msg = await channel.send(embed=embed)
-            await self.config.guild(guild).setup.list_message_id.set(msg.id)
+                            if not unique_members:
+                                continue
+
+                            # Sort by status priority (Online > Idle > DND > Offline)
+                            def sort_key(m):
+                                status_order = {"online": 0, "idle": 1, "dnd": 2, "offline": 3}
+                                return (status_order.get(str(m.status), 3), m.joined_at or datetime.utcnow())
+
+                            unique_members.sort(key=sort_key)
+                            total_staff += len(unique_members)
+
+                            lines = []
+                            for m in unique_members:
+                                status_emojis = {
+                                    "online": "🟢", "idle": "🌙", "dnd": "🔴", "offline": "⚫", "streaming": "🟣"
+                                }
+                                emoji = status_emojis.get(str(m.status), "⚫")
+
+                                line = f"{m.mention}"
+                                if data['settings']['show_status']:
+                                    line = f"{emoji} {line}"
+                                if data['settings']['show_join_date']:
+                                    line += f" `Joined: {m.joined_at.strftime('%Y-%m-%d')}`"
+                                lines.append(line)
+
+                            embed.add_field(name=f"{rdata['label']} ({len(unique_members)})", value="\n".join(lines), inline=False)
+
+                        embed.set_footer(text=f"Total Staff: {total_staff}")
+
+                        # Send or Edit
+                        if msg_id:
+                            try:
+                                msg = await channel.fetch_message(msg_id)
+                                await msg.edit(embed=embed)
+                            except discord.NotFound:
+                                msg = await channel.send(embed=embed)
+                                await self.config.guild(guild).setup.list_message_id.set(msg.id)
+                        else:
+                            msg = await channel.send(embed=embed)
+                            await self.config.guild(guild).setup.list_message_id.set(msg.id)
+
+                # If another refresh was requested while we were processing, run once more.
+                if guild.id not in self._list_update_pending:
+                    break
 
         finally:
-            del self._list_update_locks[guild.id]
+            self._list_update_locks.pop(guild.id, None)
+            self._list_update_pending.discard(guild.id)
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
@@ -303,6 +312,8 @@ class StaffManager(commands.Cog):
                     if c:
                         await c.send(f"🎉 Congrats to {member.mention} on their promotion to **{target_role.name}**!")
 
+                await self.update_staff_list(ctx.guild)
+
             except discord.Forbidden:
                 await msg.edit(content="❌ I do not have permission to manage roles.", view=None)
         else:
@@ -382,6 +393,8 @@ class StaffManager(commands.Cog):
                     if c:
                         await c.send(f"⚠️ {member.mention} has been demoted from **{current_role_obj.name}**.")
 
+                await self.update_staff_list(ctx.guild)
+
             except discord.Forbidden:
                 await msg.edit(content="❌ I do not have permission to manage roles.", view=None)
         else:
@@ -445,6 +458,7 @@ class StaffManager(commands.Cog):
                 try:
                     await member.remove_roles(*to_remove, reason="Max Strikes Reached")
                     await ctx.send("User has been removed from staff roles.")
+                    await self.update_staff_list(ctx.guild)
                 except:
                     await ctx.send("Failed to auto-remove roles (Permissions error).")
 
